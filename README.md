@@ -8,7 +8,7 @@ variants, render them, pick the one you like, roll again.
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone <this repo> comfyui_fizgig_explorer
+git clone https://github.com/rumik992223-dotcom/comfyui_fizgig_explorer_mytest.git
 # no dependencies beyond ComfyUI itself
 ```
 
