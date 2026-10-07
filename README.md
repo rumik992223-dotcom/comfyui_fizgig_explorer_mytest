@@ -1,8 +1,8 @@
 # comfyui_fizgig_explorer
 
-**LoRA the Explorer**, ported from [Fizgig](https://github.com/shootthesound/Fizgig)
-(Apache-2.0) to ComfyUI. Evolutionary per-block LoRA discovery: roll four mutated
-variants, render them, pick the one you like, roll again.
+LoRA the Explorer — Evolutionary per-block LoRA discovery.
+Ported from Fizgig (Apache-2.0) to ComfyUI.
+The Idea: The tool generates 4 mutated variants of LoRA block weights. You pick the best one, and the process repeats, gradually "building up" the desired effect without destroying the original image's composition.
 
 ## Install
 
