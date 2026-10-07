@@ -1,78 +1,65 @@
 """ComfyUI nodes for LoRA the Explorer (ported from Fizgig).
-
 Node graph, and what it replaces in the original app:
-
-    FizgigLoraExplorer  --- the brain
-        reads the LoRA's safetensors header, derives the block set the way
-        WorkbenchEngine.primary_block_ids did, and rolls the four variants the
-        "Roll variants" button rolled. One JSON output per variant.
-
-    FizgigExplorerPick  --- "Variant N selected as new baseline"
-        takes a variant's JSON, stamps seed/resolution/prompt into it and hands
-        it back for the next roll. Wire variant N -> Pick -> Explorer.roll_state.
-
-    FizgigLoraBlockLoader --- per-block strengths, applied for real
-        Fizgig did this in memory (FamilyLoRA.set_blocks -> per-block
-        multiplier on the live adapter). We do the equivalent by scaling the
-        LoRA's own weights per block before handing the dict to ComfyUI's
-        standard loader, so no per-block loader node is required.
-
-    FizgigCheckpointScan --- LoRA Royale's scanner (lora_royale/scan.py),
-        for feeding a run's epoch checkpoints one at a time.
-
+FizgigLoraExplorer  --- the brain
+    reads the LoRA's safetensors header, derives the block set the way
+    WorkbenchEngine.primary_block_ids did, and rolls the four variants the
+    "Roll variants" button rolled. One JSON output per variant.
+FizgigExplorerPick  --- "Variant N selected as new baseline"
+    takes a variant's JSON, stamps seed/resolution/prompt into it and hands
+    it back for the next roll. Wire variant N -> Pick -> Explorer.roll_state.
+FizgigLoraBlockLoader --- per-block strengths, applied for real
+    Fizgig did this in memory (FamilyLoRA.set_blocks -> per-block
+    multiplier on the live adapter). We do the equivalent by scaling the
+    LoRA's own weights per block before handing the dict to ComfyUI's
+    standard loader, so no per-block loader node is required.
+FizgigCheckpointScan --- LoRA Royale's scanner (lora_royale/scan.py),
+    for feeding a run's epoch checkpoints one at a time.
 Everything the tkinter tab did around the edges -- the undo stack, the
 thumbnail refs, the VRAM unload on tab switch, the thread handoff to Tk's
 `after()` -- has no counterpart here and is not carried over.
-
 Two things worth knowing before reading the code:
-
-1. Key layouts differ per family, and ComfyUI normalises some of them on load.
-
-    Klein 9B       lora_unet_double_blocks_0_lora_up.weight    -> double_0
-                   lora_unet_single_blocks_23_lora_up.weight   -> single_23
-    Klein 9B       diffusion_model.double_blocks.0.lora_B.weight -> double_0
-    Krea 2         lora_unet_blocks_4_lora_up.weight            -> block_4
-                   lora_unet_txtfusion_layerwise_blocks_1_...   -> txt_lw_1
-    Qwen 2.1       transformer.transformer_blocks.4.attn.to_q.lora_B.weight
-    MiniMax H3     lora_unet_blocks_7_lora_up.weight            -> h3blk_7
-                   lora_unet_token_refiner_blocks_1_...         -> h3_rf_1
-
-   Qwen, Krea 2 and H3 share the bare `blocks_<n>` shape, so the family is read
-   from the file's metadata first and only guessed from shape as a fallback.
-
-2. ComfyUI forbids cycles in a graph. Wiring a node's output back into a node
-   that feeds it -- Explorer.variant_1 -> Pick -> Explorer -- fails validation
-   before anything runs ("Failed to validate prompt for output ..."), whatever
-   the types are. The Explorer's loop has to be broken, and there are two ways,
-   both supported:
-
-   - `state_source = "picked variant"` (default). One generation per run:
-     roll, look, then edit the `roll_state` widget to the Pick node's
-     `baseline` text, and re-queue. `last_pick_blocks` gets the Pick's
-     `changed_blocks` the same way. Two paste operations per generation.
-   - `state_source = "bootstrap from LoRA weights"`. In-graph and repeatable:
-     the Explorer reads the per-block strengths straight out of a baked LoRA
-     (`bootstrap_lora`, measured against `bootstrap_reference`), so a save-LoRA
-     node closes the loop through the filesystem instead of through a wire.
-     Bake, re-queue, and the next roll starts from what you baked. No pasting.
-
-3. The loop inputs are widgets rather than dangling sockets on purpose: an
-   unfilled widget is visible on the node, where an optional socket that never
-   got connected is not. That distinction cost a user four identical renders
-   once.
-
+Key layouts differ per family, and ComfyUI normalises some of them on load.
+Klein 9B       lora_unet_double_blocks_0_lora_up.weight    -> double_0
+lora_unet_single_blocks_23_lora_up.weight   -> single_23
+Klein 9B       diffusion_model.double_blocks.0.lora_B.weight -> double_0
+Krea 2         lora_unet_blocks_4_lora_up.weight            -> block_4
+lora_unet_txtfusion_layerwise_blocks_1_...   -> txt_lw_1
+Qwen 2.1       transformer.transformer_blocks.4.attn.to_q.lora_B.weight
+MiniMax H3     lora_unet_blocks_7_lora_up.weight            -> h3blk_7
+lora_unet_token_refiner_blocks_1_...         -> h3_rf_1
+Qwen, Krea 2 and H3 share the bare `blocks_<n>` shape, so the family is read
+from the file's metadata first and only guessed from shape as a fallback.
+ComfyUI forbids cycles in a graph. Wiring a node's output back into a node
+that feeds it -- Explorer.variant_1 -> Pick -> Explorer -- fails validation
+before anything runs ("Failed to validate prompt for output ..."), whatever
+the types are. The Explorer's loop has to be broken, and there are two ways,
+both supported:
+`state_source = "picked variant"` (default). One generation per run:
+roll, look, then edit the `roll_state` widget to the Pick node's
+`baseline` text, and re-queue. `last_pick_blocks` gets the Pick's
+`changed_blocks` the same way. Two paste operations per generation.
+`state_source = "bootstrap from LoRA weights"`. In-graph and repeatable:
+the Explorer reads the per-block strengths straight out of a baked LoRA
+(`bootstrap_lora`, measured against `bootstrap_reference`), so a save-LoRA
+node closes the loop through the filesystem instead of through a wire.
+Bake, re-queue, and the next roll starts from what you baked. No pasting.
+`state_source = "bootstrap from cache"`. NEW: In-memory cache for fast iteration:
+the Explorer stores all 4 variants in memory after each roll. Select a variant
+via the `continue_from_variant` dropdown, and the next roll starts from that
+variant's state without saving/loading files. Fast, but lost on ComfyUI restart.
+The loop inputs are widgets rather than dangling sockets on purpose: an
+unfilled widget is visible on the node, where an optional socket that never
+got connected is not. That distinction cost a user four identical renders
+once.
 The loader prints its report to the ComfyUI console as well as the `report`
 output, because a STRING output is not displayed anywhere by default.
 """
-
 import json
 import logging
 import os
 import uuid
 from typing import Dict, Optional
-
 import folder_paths
-
 from .explorer_core import (
     ANCHORS,
     IDENTITY_BLOCKS,
@@ -100,8 +87,12 @@ FAMILIES = ["auto", "klein9b", "krea2", "qwen21", "h3"]
 STATE_PICKED = "picked variant"
 STATE_BOOTSTRAP = "bootstrap from LoRA weights"
 STATE_FRESH = "fresh state"
-STATE_SOURCES = [STATE_PICKED, STATE_BOOTSTRAP, STATE_FRESH]
+STATE_CACHE = "bootstrap from cache"
+STATE_SOURCES = [STATE_PICKED, STATE_BOOTSTRAP, STATE_FRESH, STATE_CACHE]
 
+# === АВТОМАТИЗАЦИЯ: Глобальный кэш для хранения вариантов в памяти ===
+# Ключ: имя LoRA, Значение: словарь с 4 вариантами и метаданными
+FIZGIG_GLOBAL_CACHE = {}
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -113,12 +104,10 @@ def _lora_path(name: str) -> str:
         raise FileNotFoundError(f"LoRA not found: {name}")
     return path
 
-
 def _resolve_family(family: str, path: str) -> str:
     if family != "auto":
         return family
     return guess_family(path)
-
 
 def _anchor_for(family: str, block_ids) -> str:
     """The composition anchor, with a fallback for shapes we did not foresee."""
@@ -129,7 +118,6 @@ def _anchor_for(family: str, block_ids) -> str:
         if candidate in block_ids:
             return candidate
     return next(iter(block_ids)) if block_ids else anchor
-
 
 def _resolve_file(entry: str, lora_name: str) -> str:
     """A file the user named: an absolute path, or a name in either loras or the
@@ -149,36 +137,31 @@ def _resolve_file(entry: str, lora_name: str) -> str:
     if os.path.isfile(entry):
         return os.path.abspath(entry)
     raise FileNotFoundError(
-        f"{entry!r} not found (looked on disk and in the loras / fizgig_loras folders)")
-
+        f"{entry!r} not found (looked on disk and in the loras / fizgig_loras folders)"
+    )
 
 def _state_from_baked_lora(baked_name, reference_name, active, family, primary_path):
     """Read per-block strengths out of a baked LoRA, against its reference file.
-
     This is the in-graph half of the loop: a save-LoRA node writes the picked
     variant, and the next roll reads it back. It has to go through the
     filesystem because a wire back into this node would be a cycle, and ComfyUI
     refuses those.
-
     A multiplier is a *ratio* of the baked factor against the file it was baked
     from (see core.strength_from_pair), so both files are needed. Either may be
     `lora_name`, which is the useful default: with no bake yet, baked ==
     reference == the LoRA, every ratio is 1.0, and the first roll starts fresh.
     """
     import comfy.utils
-
     baked_path = _resolve_file(baked_name, primary_path)
     ref_path = _resolve_file(reference_name, primary_path)
     if os.path.normcase(baked_path) == os.path.normcase(ref_path):
         print(f"[FizgigLoraExplorer] bootstrap: {os.path.basename(baked_path)} is its own "
               "reference -- reading every block as 1.0 (a fresh start)", flush=True)
-
     baked = comfy.utils.load_torch_file(baked_path, safe_load=True)
     if os.path.normcase(baked_path) == os.path.normcase(ref_path):
         reference = baked
     else:
         reference = comfy.utils.load_torch_file(ref_path, safe_load=True)
-
     state = state_from_baked(baked, reference, active, family=family)
     measured = {b: bs for b, bs in state.blocks.items()
                 if bs.primary_enabled is False or bs.primary_strength != 1.0}
@@ -187,11 +170,10 @@ def _state_from_baked_lora(baked_name, reference_name, active, family, primary_p
           + ("" if measured else " -- this reads as an unedited file"), flush=True)
     return state
 
-
 def _no_blocks_error(lora_name: str, path: str, family: str) -> ValueError:
     """Say which layout the file actually uses, rather than only which ones we
     wanted. A LoRA that adapts nothing the Explorer can address is usually a
-    text-encoder-only file, a LyCORIS/GLoRA one, or a layout from a family this
+    text-encoder-only file, a LyCORIS/ GLoRA one, or a layout from a family this
     port does not know yet -- the shapes tell you which."""
     keys, meta = read_safetensors_keys(path)
     shapes = summarise_key_shapes(keys)
@@ -202,7 +184,7 @@ def _no_blocks_error(lora_name: str, path: str, family: str) -> ValueError:
         f"  This file's key shapes:\n{shown}\n"
         f"  metadata: {meta_bits}\n"
         "The Explorer needs keys that name transformer blocks. Known layouts:\n"
-        "    lora_unet_double_blocks_0_ / lora_unet_single_blocks_23_  (Klein 9B)\n"
+        "    lora_unet_double_blocks_0_ / lora_unet_single_blocks_23_ (Klein 9B)\n"
         "    lora_unet_blocks_4_                                      (Krea 2)\n"
         "    transformer.transformer_blocks.4.attn.to_q.lora_B.weight (Qwen Image 2.1)\n"
         "    lora_unet_blocks_7_ / lora_unet_token_refiner_blocks_1_  (MiniMax H3)\n"
@@ -211,7 +193,6 @@ def _no_blocks_error(lora_name: str, path: str, family: str) -> ValueError:
         "block_N vs h3blk_N. Otherwise use active_blocks_override to name the "
         "blocks by hand."
     )
-
 
 # ---------------------------------------------------------------------------
 # 1. the brain
@@ -233,7 +214,9 @@ class FizgigLoraExplorer:
         "it negates the anchor and inverts an edit). Send each variant into "
         "FizgigLoraBlockLoader, then wire the loader's MODEL/CLIP into its own "
         "KSampler. When you like one, feed it back through FizgigExplorerPick "
-        "into roll_state and roll again."
+        "into roll_state and roll again. NEW: Use 'bootstrap from cache' mode "
+        "and select a variant from the dropdown to continue from that variant "
+        "without saving files."
     )
 
     @classmethod
@@ -272,14 +255,23 @@ class FizgigLoraExplorer:
                 "last_pick_blocks": ("STRING", {"default": "",
                                                 "tooltip": "Variant 4 excludes these. Connect "
                                                            "FizgigExplorerPick.changed_blocks here."}),
-                "state_source": (STATE_SOURCES, {"default": STATE_PICKED,
+                "state_source": (STATE_SOURCES, {"default": STATE_FRESH,
                                                  "tooltip": "Where this roll starts from.\n"
                                                             "'picked variant': the roll_state text (paste the "
                                                             "Pick node's baseline).\n"
                                                             "'bootstrap from LoRA weights': read the per-block "
                                                             "strengths out of a baked LoRA -- closes the loop "
                                                             "in-graph, no pasting.\n"
-                                                            "'fresh state': every block at 1.0, every run."}),
+                                                            "'fresh state': every block at 1.0, every run.\n"
+                                                            "'bootstrap from cache': NEW - use in-memory cache "
+                                                            "and select variant from dropdown."}),
+                # === АВТОМАТИЗАЦИЯ: Выпадающее меню выбора варианта ===
+                "continue_from_variant": (["None", "Variant 1", "Variant 2", "Variant 3", "Variant 4"],
+                                          {"default": "None",
+                                           "tooltip": "Only for 'bootstrap from cache'. Select which variant "
+                                                      "from the previous roll to continue from. The cache stores "
+                                                      "all 4 variants in memory for fast iteration."}),
+                
                 "roll_state": ("STRING", {"default": "",
                                           "tooltip": "Where the roll starts. With 'picked variant', paste the "
                                                      "Pick node's baseline here (a wire would make a cycle, which "
@@ -309,9 +301,11 @@ class FizgigLoraExplorer:
         }
 
     def roll(self, lora_name, family, mutations, intensity, structure, seed,
-             locked_blocks="", last_pick_blocks="", state_source=STATE_PICKED,
+             locked_blocks="", last_pick_blocks="", state_source=STATE_FRESH,
+             continue_from_variant="None",
              roll_state="", bootstrap_lora="", bootstrap_reference="",
              active_blocks_override="", structural_variants=False):
+        
         path = _lora_path(lora_name)
         fam = _resolve_family(family, path)
 
@@ -323,15 +317,43 @@ class FizgigLoraExplorer:
             raise _no_blocks_error(lora_name, path, fam)
 
         locked = {b.strip() for b in locked_blocks.split(",") if b.strip()}
-        last_pick = {b.strip() for b in last_pick_blocks.split(",") if b.strip()}
         anchor = _anchor_for(fam, active)
+        cache_key = lora_name
 
-        rolling_from = state_source != STATE_FRESH
-        if state_source == STATE_BOOTSTRAP:
+        # === АВТОМАТИЗАЦИЯ: last_pick_blocks из кэша предыдущего раунда ===
+        if state_source == STATE_CACHE:
+            if cache_key in FIZGIG_GLOBAL_CACHE:
+                # last_pick — это блоки, которые ИЗМЕНИЛ пользователь в ПРЕДЫДУЩЕМ раунде
+                last_pick = set(FIZGIG_GLOBAL_CACHE[cache_key].get("last_changed_blocks", []))
+                print(f"[FizgigAutomation] last_pick_blocks из кэша: {sorted(last_pick)}", flush=True)
+            else:
+                last_pick = set()
+        else:
+            last_pick = {b.strip() for b in last_pick_blocks.split(",") if b.strip()}
+
+        # === Извлечение базового состояния ===
+        if state_source == STATE_CACHE:
+            if continue_from_variant == "None":
+                raise ValueError(
+                    "Вы выбрали 'bootstrap from cache', но не указали вариант в 'continue_from_variant'!\n"
+                    "Выберите Variant 1-4 из выпадающего меню."
+                )
+            
+            if cache_key in FIZGIG_GLOBAL_CACHE and continue_from_variant in FIZGIG_GLOBAL_CACHE[cache_key]:
+                # Достаем живой объект SliderState из памяти Python
+                baseline = FIZGIG_GLOBAL_CACHE[cache_key][continue_from_variant]
+                # ВАЖНО: копируем объект, чтобы не мутировать оригинал в кэше
+                baseline = SliderState.from_json(baseline.to_json())
+                print(f"[FizgigAutomation] База восстановлена из кэша: {continue_from_variant}", flush=True)
+            else:
+                print(f"[FizgigAutomation] Кэш пуст для {lora_name}. Начинаем с fresh state.", flush=True)
+                baseline = SliderState.from_block_ids(active)
+                
+        elif state_source == STATE_BOOTSTRAP:
             baseline = _state_from_baked_lora(bootstrap_lora.strip() or lora_name,
                                               bootstrap_reference.strip() or lora_name,
                                               active, fam, path)
-        elif rolling_from and roll_state.strip():
+        elif state_source == STATE_PICKED and roll_state.strip():
             baseline = SliderState.from_json(json.loads(roll_state))
             # A map from another family is the one error that makes four renders
             # identical while nothing else looks wrong: the ids do not exist in
@@ -375,6 +397,33 @@ class FizgigLoraExplorer:
         # rather than leaving it to be discovered in the output.
         moved = [sorted(v.diff_blocks(baseline)) for v in variants]
 
+        # === АВТОМАТИЗАЦИЯ: Запись в кэш ===
+        # Сохраняем:
+        # 1. Все 4 варианта текущего раунда (чтобы пользователь мог выбрать в СЛЕДУЮЩЕМ раунде)
+        # 2. last_changed_blocks — блоки, которые изменил ТЕКУЩИЙ выбранный вариант 
+        #    (они станут last_pick_blocks для СЛЕДУЮЩЕГО раунда)
+        
+        # Определяем, какие блоки изменил выбранный пользователем вариант в ТЕКУЩЕМ раунде
+        # Это нужно для Variant 4 следующего раунда
+        if continue_from_variant != "None":
+            variant_idx = int(continue_from_variant.split()[-1]) - 1  # "Variant 1" -> 0
+            current_last_changed = moved[variant_idx]
+        else:
+            current_last_changed = []
+
+        FIZGIG_GLOBAL_CACHE[cache_key] = {
+            "Variant 1": variants[0],
+            "Variant 2": variants[1],
+            "Variant 3": variants[2],
+            "Variant 4": variants[3],
+            "last_changed_blocks": current_last_changed,  # Для Variant 4 следующего раунда
+            "round_info": {
+                "lora": lora_name,
+                "family": fam,
+                "seed": seed,
+            }
+        }
+
         # How far the BASELINE sits from a plain 1.0 LoRA. A roll from "picked
         # variant" (or from a bootstrap bake) inherits every earlier generation's
         # edits, so each new variant starts from an already-moved file: "1 changed"
@@ -389,14 +438,17 @@ class FizgigLoraExplorer:
                           " -- this roll starts from an already-edited state\n      worst: %s"
                           % (len(drift), len(baseline.blocks),
                              ", ".join("%s=%+.2f" % (b, v) for b, v in worst)))
+        
         if not any(moved):
             logger.warning(
                 "FizgigLoraExplorer: %s -- all four variants are identical to the baseline. "
                 "Every active block is locked, or the lock set covers the whole LoRA.",
                 lora_name)
+        
         for i, blocks in enumerate(moved):
             logger.info("FizgigLoraExplorer: variant %d changed %d block(s): %s",
                         i + 1, len(blocks), ", ".join(blocks) or "(none)")
+        
         print(
             f"[FizgigLoraExplorer] {lora_name}  family={fam}  anchor={anchor}  "
             f"blocks={len(active)}  from={state_source}\n"
@@ -410,10 +462,11 @@ class FizgigLoraExplorer:
                 for i, b in enumerate(moved)),
             flush=True,
         )
+        
         if not structural_variants and structure > 0.0:
             logger.info("FizgigLoraExplorer: structure=%.2f but structural_variants is off -- "
                         "no anchor invert/extreme this roll", structure)
-
+        
         payloads = [json.dumps(v.to_json()) for v in variants]
         meta = json.dumps({
             "family": fam, "anchor": anchor, "lora": lora_name,
@@ -422,9 +475,9 @@ class FizgigLoraExplorer:
             "seed": seed, "intensity": intensity, "structure": structure,
             "mutations": mutations, "state_source": state_source,
             "changed": moved,
+            "cache_enabled": state_source == STATE_CACHE,
         })
         return (*payloads, json.dumps(baseline.to_json()), meta)
-
 
 # ---------------------------------------------------------------------------
 # 2. pick a variant -> new baseline
@@ -474,7 +527,6 @@ class FizgigExplorerPick:
         if preview_height:
             state.preview_height = preview_height
         state.primary_scale = load_strength
-
         changed = ""
         if previous_baseline.strip():
             try:
@@ -486,7 +538,6 @@ class FizgigExplorerPick:
         return (json.dumps(state.to_json()), changed,
                 state.to_plain_text(family=_family_hint(state)))
 
-
 def _family_hint(state: SliderState) -> str:
     """Which family's block naming a state uses -- only for the readout tags."""
     ids = list(state.blocks)
@@ -496,7 +547,6 @@ def _family_hint(state: SliderState) -> str:
         return "h3"
     return "qwen21" if ids and IDENTITY_BLOCKS["qwen21"] & set(ids) else "krea2"
 
-
 # ---------------------------------------------------------------------------
 # 3. apply per-block strengths (live, no baked file)
 # ---------------------------------------------------------------------------
@@ -505,33 +555,32 @@ def _family_hint(state: SliderState) -> str:
 # absorbs the slider into the "up" factor and sets alpha = rank so the file's
 # own scale becomes 1.0 (bake.py:_bake_single_contribution). We do the same
 # absorption, but only in memory -- nothing is written to disk.
-#
+
 # Every layout puts the output factor last, but the separators differ: kohya
 # uses an underscore (lora_unet_blocks_0_lora_up.weight), Qwen and other
 # diffusers-format files use a dot (transformer_blocks.0.attn.to_q.lora_B.weight).
 _UP_SUFFIXES = (".lora_up.weight", ".lora_B.weight", ".lora_emb.weight",
                 "_lora_up.weight", "_lora_B.weight", "_lora_emb.weight")
+
 # LyCORIS. Both forms are linear in their first factor --
-#   m * kron(w1, w2) == kron(m * w1, w2)          (LoKr)
-#   (m * W1) # W2    == m * (W1 # W2)             (LoHa, # = Hadamard)
+# m * kron(w1, w2) == kron(m * w1, w2)          (LoKr)
+# (m * W1) # W2    == m * (W1 # W2)             (LoHa, # = Hadamard)
 # -- so a multiplier absorbs into w1 exactly the way it absorbs into lora_up,
 # which is what bake.py does to keep a LoKR in, a LoKR out. ComfyUI reads w1 as
 # `lokr_w1_a @ lokr_w1_b` when the split form is present, else `lokr_w1`, so the
 # factor to scale is whichever one ComfyUI reads as the first.
-#
 # Without this a LyCORIS file has no tensor a slider can reach: nothing is
 # scaled and every variant renders identically. That "LoKR in, LoKR out" line in
 # Fizgig's release notes is this.
 _LYCORIS_FIRST_FACTORS = (".lokr_w1_a", ".lokr_w1", ".hada_w1_a", ".hada_w1",
                           "_lokr_w1_a", "_lokr_w1", "_hada_w1_a", "_hada_w1")
+
 # Kept uniform: GLoRA's 4-matrix form and the Tucker/CP variants, which Fizgig's
 # bake refuses too.
 _LYCORIS_UNSUPPORTED = ("glora", "lora_tucker", "lora_cp")
 
-
 def _lycoris_first_factor(key: str) -> Optional[str]:
     """The suffix to multiply if this is a LyCORIS key we can scale, else None.
-
     A full tensor key and a bare suffix both work, because the loader sees
     `transformer.transformer_blocks.3.attn.to_q.lokr_w1` while the bake sees the
     grouped suffix `lokr_w1`.
@@ -545,10 +594,8 @@ def _lycoris_first_factor(key: str) -> Optional[str]:
             return suffix
     return None
 
-
 class FizgigLoraBlockLoader:
     """Load a LoRA with a per-block multiplier map from the Explorer.
-
     Kohya, diffusers and LyCORIS (LoKR/LoHa) keys are all scaled -- a LyCORIS
     file is linear in its w1, so the multiplier absorbs there the same way it
     absorbs into lora_up, which is what Fizgig's bake does to keep a LoKR in, a
@@ -600,7 +647,6 @@ class FizgigLoraBlockLoader:
              scale_unlisted=True, verbose=False):
         import comfy.sd
         import comfy.utils
-
         path = _lora_path(lora_name)
         try:
             state = SliderState.from_json(json.loads(block_map)) if block_map.strip() else None
@@ -637,7 +683,8 @@ class FizgigLoraBlockLoader:
 
         lora_sd = comfy.utils.load_torch_file(path, safe_load=True)
         report, warnings = _scale_lora_weights(lora_sd, state, path, fam,
-                                              unlisted_strength, scale_unlisted, verbose)
+                                               unlisted_strength, scale_unlisted, verbose)
+
         if widget_fam and map_fam and widget_fam != map_fam:
             raise ValueError(
                 f"family mismatch: the block map is {map_fam} but the family widget says "
@@ -658,6 +705,7 @@ class FizgigLoraBlockLoader:
                 f"{lora_name}: the scaled weights could not be applied to this model.\n"
                 f"  {type(e).__name__}: {e}\n{report}"
             ) from e
+
         if model_out is None:
             model_out = model
         if clip_out is None:
@@ -682,6 +730,7 @@ class FizgigLoraBlockLoader:
                 warnings.append(
                     "the LoRA's blocks do not line up with the block map -- the map is for "
                     "another family or another LoRA")
+
         if clip_out is None or clip_out is clip:
             report += "\n(CLIP was not patched -- normal for a block-only LoRA.)"
 
@@ -689,8 +738,8 @@ class FizgigLoraBlockLoader:
         print(f"[FizgigLoraBlockLoader] {lora_name}\n{report}", flush=True)
         for w in warnings:
             logger.warning("FizgigLoraBlockLoader: %s -- %s", lora_name, w)
-        return (model_out, clip_out, report)
 
+        return (model_out, clip_out, report)
 
 def _blocks_in_lora(lora_sd, family: str):
     """The block ids a loaded LoRA's own keys address."""
@@ -701,10 +750,8 @@ def _blocks_in_lora(lora_sd, family: str):
             out.add(bid)
     return out
 
-
 def _match_report(model, clip, lora_sd, family):
     """How many of the loaded model's modules this LoRA can actually patch.
-
     Returns (module_count, block_count, error_text). ComfyUI's own
     `load_lora_for_models` clones the model regardless, so object identity
     cannot answer this; we ask the same key-mapping functions it uses. These
@@ -727,7 +774,6 @@ def _match_report(model, clip, lora_sd, family):
             loaded = comfy.lora.load_lora(lora_sd, key_map)
     except Exception as e:
         return 0, 0, f"(could not measure how many modules this LoRA patches: {type(e).__name__}: {e})"
-
     blocks = set()
     for patch_keys in loaded.keys():
         for k in (patch_keys if isinstance(patch_keys, (tuple, list)) else [patch_keys]):
@@ -736,29 +782,22 @@ def _match_report(model, clip, lora_sd, family):
                 blocks.add(bid)
     return len(loaded), len(blocks), ""
 
-
-def _scale_lora_weights(lora_sd, state, path, family, unlisted_strength, scale_unlisted,
-                        verbose=False):
+def _scale_lora_weights(lora_sd, state, path, family, unlisted_strength, scale_unlisted, verbose=False):
     """Multiply each module's first factor by its block's slider value.
-
     One factor per module is all the maths needs: LoRA is linear in
     lora_up/lora_B, LyCORIS in its w1. Returns (report_text, warnings)."""
     import torch
-
     if state is None:
         return ("No block map supplied -- loaded at a uniform strength. "
                 "Every one of the four branches had no map to apply, so they will "
                 "all render identically.", [])
-
     keys = list(lora_sd.keys())
     fam = family
     if not fam or fam == "auto":
         _, meta = read_safetensors_keys(path)
         fam = family_from_metadata(meta) or guess_family(path)
-
     touched, outside, scaled = set(), 0, 0
     lycoris_scaled, lycoris_uniform = 0, 0
-
     for key in keys:
         is_lycoris = _lycoris_first_factor(key)
         is_plain = key.endswith(_UP_SUFFIXES) or any((s + ".") in key for s in _UP_SUFFIXES)
@@ -778,7 +817,6 @@ def _scale_lora_weights(lora_sd, state, path, family, unlisted_strength, scale_u
             else:
                 mult = float(bs.primary_strength) if bs.primary_enabled else 0.0
                 touched.add(bid)
-
         try:
             lora_sd[key] = (lora_sd[key].to(torch.float32) * mult).to(lora_sd[key].dtype)
             scaled += 1
@@ -786,7 +824,6 @@ def _scale_lora_weights(lora_sd, state, path, family, unlisted_strength, scale_u
                 lycoris_scaled += 1
         except Exception as e:            # pragma: no cover - defensive
             logger.warning("FizgigLoraBlockLoader: could not scale %s (%s)", key, e)
-
     off = [b for b, bs in state.blocks.items() if not bs.primary_enabled]
     lines = [
         f"family: {fam}",
@@ -810,7 +847,6 @@ def _scale_lora_weights(lora_sd, state, path, family, unlisted_strength, scale_u
         lines.append("multipliers: "
                      + ", ".join(f"{b}={'off' if not state.blocks[b].primary_enabled else format(state.blocks[b].primary_strength, '.3f')}"
                                  for b in moved))
-
     warnings = []
     if scaled == 0:
         warnings.append(
@@ -820,7 +856,6 @@ def _scale_lora_weights(lora_sd, state, path, family, unlisted_strength, scale_u
         warnings.append(
             "WARNING: tensors were scaled but not one of them belonged to a block in the map")
     return ("\n".join(lines), warnings)
-
 
 # ---------------------------------------------------------------------------
 # 4. bake the chosen variant into a file
@@ -849,7 +884,6 @@ _FACTOR_ENDINGS = tuple(sorted((
     ".alpha", "_alpha",
 ), key=len, reverse=True))
 
-
 # The factor names themselves, without any separator. A key is split by finding
 # one of these as its trailing segment, no matter how short the module name is:
 # `lokr_w1` alone must split (module "", factor "lokr_w1"), and
@@ -867,10 +901,8 @@ _FACTOR_NAMES = tuple(sorted({
     "alpha",
 }, key=len, reverse=True))
 
-
 def _split_factor(key: str):
     """(module_name, factor) for one tensor key, or None if it names no factor.
-
     `transformer.transformer_blocks.0.attn.to_q.lora_B.weight`
         -> ("transformer.transformer_blocks.0.attn.to_q", "lora_B.weight")
     `lora_unet_double_blocks_0_lora_up.weight`
@@ -884,11 +916,10 @@ def _split_factor(key: str):
         for sep in (".", "_"):
             tail = sep + name
             if key.endswith(tail):
-                module = key[: -len(tail)]
+                module = key[:-len(tail)]
                 if module:
                     return module, name
     return None
-
 
 def _group_by_module(sd: Dict) -> Dict[str, Dict]:
     """{module_name: {suffix: tensor}} -- one entry per LoRA module, so the
@@ -905,13 +936,11 @@ def _group_by_module(sd: Dict) -> Dict[str, Dict]:
         out.setdefault(module, {})[suffix] = tensor
     return out
 
-
 def _alpha_key(mod_keys: Dict) -> Optional[str]:
     for k in mod_keys:
         if k == "alpha" or k.endswith(".alpha") or k.endswith("_alpha"):
             return k
     return None
-
 
 def _rank_of(mod_keys: Dict, up_key: str) -> int:
     """The rank ComfyUI's loader divides alpha by. Both kohya `lora_up` and
@@ -923,7 +952,6 @@ def _rank_of(mod_keys: Dict, up_key: str) -> int:
     except Exception:
         return 0
 
-
 # The suffix check has to accept both spellings: _group_by_module hands over
 # `lora_B.weight` (no leading dot), while a full key reads
 # `transformer.transformer_blocks.0.attn.to_q.lora_B.weight`. Writing the
@@ -934,17 +962,15 @@ def _is_factor_suffix(name: str, suffixes) -> bool:
     separators first: the constants carry a leading dot, _split_factor hands over
     bare names like `lora_B.weight`, and an underscore-separated kohya name
     (`lora_unet_blocks_0_lora_up.weight` -> `lora_up.weight`) must match too."""
-    bare = str(name).lstrip("._")
+    bare = str(name).lstrip(".")
     for sfx in suffixes:
-        sfx_bare = str(sfx).lstrip("._")
+        sfx_bare = str(sfx).lstrip(".")
         if bare == sfx_bare or bare.endswith("." + sfx_bare) or bare.endswith("_" + sfx_bare):
             return True
     return False
 
-
 def _factor_sample(mod_keys: Dict) -> str:
     """The key that decides what kind of module this is.
-
     NOT `next(iter(mod_keys))`: a dict's first key is insertion order, and a
     LoKR module comes out of _group_by_module as
     `{"lokr_alpha": ..., "lokr_w1": ..., "lokr_w2": ...}` -- alpha first, which
@@ -957,21 +983,17 @@ def _factor_sample(mod_keys: Dict) -> str:
             return key
     return next(iter(mod_keys), "")
 
-
 def _bake_module(mod_keys: Dict, multiplier: float, fuse_lycoris: bool,
                  alpha_sentinel: float = 1e6, sentinel: bool = False) -> Optional[Dict]:
     """Absorb `multiplier` into one module's first factor.
-
     Mirrors bake.py:_bake_single_contribution (kohya/diffusers) and
     _bake_single_lycoris_contribution (LoKR/LoHa). The multiplier is linear in
     the first factor, so it absorbs there and the module keeps its shape -- a
     LoKR stays a LoKR, no SVD, no loss. GLoRA/Tucker returns None, as in bake.py.
-
     A multiplier of exactly 1.0 returns the input untouched, original alpha
     included: the no-op guarantee that keeps blocks you never moved byte-identical.
     """
     import torch
-
     # Docstring heading. (The real one is above the function.)
     sample = _factor_sample(mod_keys)
     if any(m in sample for m in _LYCORIS_UNSUPPORTED):
@@ -1030,14 +1052,12 @@ def _bake_module(mod_keys: Dict, multiplier: float, fuse_lycoris: bool,
         return dict(out)                       # not a factor we know: pass through
     if abs(multiplier - 1.0) < 1e-12:
         return dict(mod_keys)
-
     dtype = out[up_key].dtype
     for k in list(out):
         if any(sfx in k for sfx in ("lora_down", "lora_A", "lora_up", "lora_B",
                                     "lora_down", "lora_emb")):
             out[k] = out[k].to(dtype)
     out[up_key] = (out[up_key].to(torch.float32) * multiplier).to(dtype)
-
     # alpha = rank makes the file's own scale 1.0 (bake.py), so it loads at
     # strength 1.0 and the sliders mean what the preview showed.
     rank = _rank_of(out, up_key)
@@ -1045,15 +1065,12 @@ def _bake_module(mod_keys: Dict, multiplier: float, fuse_lycoris: bool,
         _set_alpha(rank)
     return out
 
-
 class FizgigLoraSave:
     """Bake a chosen Explorer variant into a .safetensors file.
-
     This is Fizgig's Repair Studio save. The slider state becomes a real file,
     loadable by ComfyUI's stock LoraLoader at strength 1.0, and the original is
     never rewritten -- the bake goes to the `fizgig_loras` folder this package
     registers, which FizgigLoraExplorer can then bootstrap from.
-
     Primary only. Fizgig's donor blending (rank-concatenating a second LoRA into
     the same blocks) is deliberately not carried over: it is a different feature
     from "save the variant I just picked", and it needs the SVD +
@@ -1109,14 +1126,13 @@ class FizgigLoraSave:
              family="auto", fuse_lycoris=True, bake_strength=False,
              sentinel_alpha=False):
         from safetensors.torch import load_file, save_file
-
         path = _lora_path(lora_name)
         if not block_map.strip():
             raise ValueError("block_map is empty -- connect the variant you picked")
         state = SliderState.from_json(json.loads(block_map))
-
         detected = _resolve_family("auto", path)
         fam = (family if family != "auto" else "") or state.family or detected
+
         # Baking a foreign map writes a file whose blocks this LoRA does not
         # have: plausible-looking, and it does nothing. Refuse.
         if state.family and detected and state.family != detected:
@@ -1138,11 +1154,9 @@ class FizgigLoraSave:
 
         modules = _group_by_module(sd)
         lm = float(state.primary_scale) if bake_strength else 1.0
-
         out: Dict = {}
         dropped, refused = set(), set()
         moved, untouched, passthrough = 0, 0, 0
-
         for mod_name, mod_keys in modules.items():
             bid = block_id_from_key(mod_name, family=fam)
             if bid is None or bid not in state.blocks:
@@ -1188,6 +1202,7 @@ class FizgigLoraSave:
                         f"_explorer_seed{state.seed}.safetensors")
         if not filename.lower().endswith(".safetensors"):
             filename += ".safetensors"
+
         out_dir = _bake_dir()
         os.makedirs(out_dir, exist_ok=True)
         out_path = os.path.join(out_dir, filename)
@@ -1196,7 +1211,6 @@ class FizgigLoraSave:
             out_path = f"{stem}_{uuid.uuid4().hex[:6]}{ext}"
 
         save_file(out, out_path, metadata=metadata)
-
         report = (f"saved: {out_path}\n"
                   f"  source: {os.path.basename(path)}  |  family {fam}\n"
                   f"  tensors written: {len(out)}  |  modules moved: {moved}"
@@ -1214,7 +1228,6 @@ class FizgigLoraSave:
                            "original weights", lora_name, len(refused))
         return (out_path,)
 
-
 def _bake_dir() -> str:
     """Where bakes go: the `fizgig_loras` folder __init__ registered, so the
     Explorer sees them by name. Falls back to output/fizgig."""
@@ -1227,7 +1240,6 @@ def _bake_dir() -> str:
     base = (folder_paths.get_output_directory()
             if hasattr(folder_paths, "get_output_directory") else ".")
     return os.path.join(base, "fizgig")
-
 
 # ---------------------------------------------------------------------------
 # 5. LoRA Royale's checkpoint scanner
@@ -1257,7 +1269,6 @@ class FizgigCheckpointScan:
         paths = "\n".join(p for _, p in found)
         labels = "\n".join(str(l) for l, _ in found)
         return (paths, labels, len(found))
-
 
 # ---------------------------------------------------------------------------
 # registration
